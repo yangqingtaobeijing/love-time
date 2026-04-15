@@ -102,6 +102,18 @@ export interface AppSettings {
   onboardingCompleted: boolean
 }
 
+/** GitHub 云同步设置 */
+export interface GitHubCloudSettings {
+  enabled: boolean
+  owner: string
+  repo: string
+  branch: string
+  path: string
+  token: string
+  lastSyncAt: string
+  lastSyncError: string
+}
+
 /** 导出数据格式 */
 export interface ExportData {
   version: number

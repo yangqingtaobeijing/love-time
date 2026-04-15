@@ -1,10 +1,30 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { settings, toggleTheme, exportAllData, importAllData, clearAllData } from '../store'
+import {
+  settings,
+  cloudSyncSettings,
+  cloudSyncStatus,
+  toggleTheme,
+  exportAllData,
+  importAllData,
+  clearAllData,
+  testCloudConnection,
+  uploadCloudData,
+  downloadCloudData,
+} from '../store'
 import type { ExportData } from '../types'
 
 const router = useRouter()
+
+const cloudBusy = computed(() =>
+  cloudSyncStatus.testing || cloudSyncStatus.uploading || cloudSyncStatus.downloading,
+)
+
+const cloudLastSyncText = computed(() => {
+  if (!cloudSyncSettings.lastSyncAt) return '尚未同步'
+  return new Date(cloudSyncSettings.lastSyncAt).toLocaleString()
+})
 
 /* ─── Export ────────────────────────────────────── */
 function handleExport() {
@@ -57,6 +77,23 @@ function doClear() {
   clearAllData()
   showClearConfirm.value = false
   router.replace('/welcome')
+}
+
+/* ─── Cloud sync ───────────────────────────────── */
+async function handleTestCloudConnection() {
+  const ok = await testCloudConnection()
+  alert(ok ? 'GitHub 连接正常' : `GitHub 连接失败：${cloudSyncSettings.lastSyncError}`)
+}
+
+async function handleUploadCloudData() {
+  const ok = await uploadCloudData()
+  alert(ok ? '已上传到 GitHub' : `上传失败：${cloudSyncSettings.lastSyncError || cloudSyncStatus.message}`)
+}
+
+async function handleDownloadCloudData() {
+  if (!confirm('从云端恢复会覆盖当前浏览器里的数据，确定继续？')) return
+  const ok = await downloadCloudData()
+  alert(ok ? '已从 GitHub 恢复数据' : `恢复失败：${cloudSyncSettings.lastSyncError || cloudSyncStatus.message}`)
 }
 </script>
 
@@ -149,6 +186,85 @@ function doClear() {
           class="hidden-input"
           @change="handleImport"
         />
+      </section>
+
+      <!-- GitHub cloud sync -->
+      <section class="settings-section">
+        <h2 class="settings-section-title">☁️ GitHub 云同步</h2>
+        <div class="settings-card card cloud-card">
+          <div class="settings-row">
+            <div>
+              <span class="settings-row-label">自动上传到 GitHub</span>
+              <p class="settings-row-hint">开启后，每次保存数据都会自动提交到指定仓库文件。</p>
+            </div>
+            <button
+              class="toggle-btn"
+              :class="{ active: cloudSyncSettings.enabled }"
+              @click="cloudSyncSettings.enabled = !cloudSyncSettings.enabled"
+            >
+              <span class="toggle-thumb" />
+            </button>
+          </div>
+
+          <div class="settings-divider" />
+
+          <div class="cloud-warning">
+            token 只保存在当前浏览器本地。建议使用 Fine-grained token，只授予数据仓库 Contents 读写权限。
+          </div>
+
+          <div class="cloud-fields">
+            <div class="cloud-field">
+              <label class="cloud-label">GitHub 用户名</label>
+              <input v-model="cloudSyncSettings.owner" class="cloud-input" placeholder="yangqingtaobeijing" />
+            </div>
+
+            <div class="cloud-field">
+              <label class="cloud-label">数据仓库名</label>
+              <input v-model="cloudSyncSettings.repo" class="cloud-input" placeholder="love-time-data" />
+            </div>
+
+            <div class="cloud-field cloud-field-half">
+              <label class="cloud-label">分支</label>
+              <input v-model="cloudSyncSettings.branch" class="cloud-input" placeholder="main" />
+            </div>
+
+            <div class="cloud-field">
+              <label class="cloud-label">数据文件路径</label>
+              <input v-model="cloudSyncSettings.path" class="cloud-input" placeholder="love-time-data.json" />
+            </div>
+
+            <div class="cloud-field">
+              <label class="cloud-label">GitHub Token</label>
+              <input
+                v-model="cloudSyncSettings.token"
+                type="password"
+                class="cloud-input"
+                placeholder="github_pat_..."
+                autocomplete="off"
+              />
+            </div>
+          </div>
+
+          <div class="cloud-actions">
+            <button class="cloud-btn" :disabled="cloudBusy" @click="handleTestCloudConnection">
+              测试连接
+            </button>
+            <button class="cloud-btn cloud-btn-primary" :disabled="cloudBusy" @click="handleUploadCloudData">
+              上传当前数据
+            </button>
+            <button class="cloud-btn" :disabled="cloudBusy" @click="handleDownloadCloudData">
+              从云端恢复
+            </button>
+          </div>
+
+          <div class="cloud-status">
+            <p>状态：{{ cloudSyncStatus.message || '等待配置' }}</p>
+            <p>最近同步：{{ cloudLastSyncText }}</p>
+            <p v-if="cloudSyncSettings.lastSyncError" class="cloud-error">
+              {{ cloudSyncSettings.lastSyncError }}
+            </p>
+          </div>
+        </div>
       </section>
 
       <!-- About -->
@@ -278,6 +394,13 @@ function doClear() {
   color: var(--color-text);
 }
 
+.settings-row-hint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
 .settings-row-right {
   display: flex;
   align-items: center;
@@ -345,6 +468,98 @@ function doClear() {
 
 .hidden-input {
   display: none;
+}
+
+/* ─── GitHub cloud sync ─────────────────────────────────── */
+.cloud-card {
+  padding-bottom: 20px;
+}
+
+.cloud-warning {
+  margin: 18px 20px 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.cloud-fields {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.cloud-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.cloud-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.cloud-input {
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 14px;
+  outline: none;
+  font-family: inherit;
+}
+
+.cloud-input:focus {
+  border-color: var(--color-primary);
+}
+
+.cloud-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  padding: 0 20px 18px;
+}
+
+.cloud-btn {
+  height: 42px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cloud-btn-primary {
+  border-color: transparent;
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.cloud-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.cloud-status {
+  margin: 0 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.cloud-error {
+  color: #FF6B6B;
 }
 
 /* ─── About ─────────────────────────────────────────────── */
@@ -443,5 +658,15 @@ function doClear() {
 
 .modal-btn-danger:hover {
   transform: translateY(-1px);
+}
+
+@media (max-width: 640px) {
+  .settings-page {
+    padding: 28px 18px 72px;
+  }
+
+  .cloud-actions {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

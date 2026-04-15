@@ -8,8 +8,10 @@ import type {
   BucketItem,
   WheelOption,
   ExportData,
+  GitHubCloudSettings,
 } from '../types'
 import { today, uuid, daysBetween, formatDate } from '../utils/date'
+import { loadDataFromGitHub, saveDataToGitHub, testGitHubAccess } from '../utils/githubSync'
 import type { AnniversaryDisplay, BucketStats } from '../types'
 
 // ─── localStorage helpers ─────────────────────────────────
@@ -36,6 +38,17 @@ const DEFAULT_SETTINGS: AppSettings = {
   nicknameB: '',
   theme: 'light',
   onboardingCompleted: false,
+}
+
+const DEFAULT_CLOUD_SYNC: GitHubCloudSettings = {
+  enabled: false,
+  owner: 'yangqingtaobeijing',
+  repo: 'love-time-data',
+  branch: 'main',
+  path: 'love-time-data.json',
+  token: '',
+  lastSyncAt: '',
+  lastSyncError: '',
 }
 
 const DEFAULT_TAGS: TimelineTag[] = [
@@ -90,15 +103,149 @@ export const wheelOptions = reactive<WheelOption[]>(
   load('love_wheel_options', [...DEFAULT_WHEEL_OPTIONS]),
 )
 
+export const cloudSyncSettings = reactive<GitHubCloudSettings>({
+  ...DEFAULT_CLOUD_SYNC,
+  ...load('love_cloud_sync_settings', { ...DEFAULT_CLOUD_SYNC }),
+})
+
+export const cloudSyncStatus = reactive({
+  uploading: false,
+  downloading: false,
+  testing: false,
+  message: '',
+})
+
 // ─── Auto-persist watchers ────────────────────────────────
 
-watch(() => ({ ...settings }), () => save('love_settings', settings), { deep: true })
-watch(timelineEvents, () => save('love_timeline_events', timelineEvents), { deep: true })
-watch(timelineTags, () => save('love_timeline_tags', timelineTags), { deep: true })
-watch(wishStars, () => save('love_wish_stars', wishStars), { deep: true })
-watch(anniversaries, () => save('love_anniversaries', anniversaries), { deep: true })
-watch(bucketList, () => save('love_bucket_list', bucketList), { deep: true })
-watch(wheelOptions, () => save('love_wheel_options', wheelOptions), { deep: true })
+function persistAndSchedule(key: string, value: unknown): void {
+  save(key, value)
+  scheduleCloudUpload()
+}
+
+watch(() => ({ ...settings }), () => persistAndSchedule('love_settings', settings), { deep: true })
+watch(timelineEvents, () => persistAndSchedule('love_timeline_events', timelineEvents), { deep: true })
+watch(timelineTags, () => persistAndSchedule('love_timeline_tags', timelineTags), { deep: true })
+watch(wishStars, () => persistAndSchedule('love_wish_stars', wishStars), { deep: true })
+watch(anniversaries, () => persistAndSchedule('love_anniversaries', anniversaries), { deep: true })
+watch(bucketList, () => persistAndSchedule('love_bucket_list', bucketList), { deep: true })
+watch(wheelOptions, () => persistAndSchedule('love_wheel_options', wheelOptions), { deep: true })
+watch(() => ({ ...cloudSyncSettings }), () => save('love_cloud_sync_settings', cloudSyncSettings), { deep: true })
+
+// ─── GitHub cloud sync ────────────────────────────────────
+
+let cloudUploadTimer: number | undefined
+let cloudUploadInFlight = false
+let cloudUploadPending = false
+let cloudSyncSuppressed = false
+
+function cloudSyncReady(): boolean {
+  return Boolean(
+    cloudSyncSettings.enabled &&
+    cloudSyncSettings.owner.trim() &&
+    cloudSyncSettings.repo.trim() &&
+    cloudSyncSettings.token.trim(),
+  )
+}
+
+function scheduleCloudUpload(): void {
+  if (!cloudSyncReady() || cloudSyncSuppressed) return
+  window.clearTimeout(cloudUploadTimer)
+  cloudUploadTimer = window.setTimeout(() => {
+    void uploadCloudData()
+  }, 1200)
+}
+
+function setCloudError(error: unknown): void {
+  const message = error instanceof Error ? error.message : '云同步失败'
+  cloudSyncSettings.lastSyncError = message
+  cloudSyncStatus.message = message
+}
+
+export async function testCloudConnection(): Promise<boolean> {
+  cloudSyncStatus.testing = true
+  cloudSyncStatus.message = '正在检查 GitHub 连接...'
+  try {
+    await testGitHubAccess(cloudSyncSettings)
+    cloudSyncSettings.lastSyncError = ''
+    cloudSyncStatus.message = 'GitHub 连接正常'
+    return true
+  } catch (error) {
+    setCloudError(error)
+    return false
+  } finally {
+    cloudSyncStatus.testing = false
+  }
+}
+
+export async function uploadCloudData(): Promise<boolean> {
+  if (!cloudSyncReady()) {
+    cloudSyncStatus.message = '云同步未启用或配置不完整'
+    return false
+  }
+
+  if (cloudUploadInFlight) {
+    cloudUploadPending = true
+    return false
+  }
+
+  cloudUploadInFlight = true
+  cloudSyncStatus.uploading = true
+  cloudSyncStatus.message = '正在上传到 GitHub...'
+
+  try {
+    await saveDataToGitHub(cloudSyncSettings, exportAllData())
+    cloudSyncSettings.lastSyncAt = new Date().toISOString()
+    cloudSyncSettings.lastSyncError = ''
+    cloudSyncStatus.message = '已上传到 GitHub'
+    return true
+  } catch (error) {
+    setCloudError(error)
+    return false
+  } finally {
+    cloudSyncStatus.uploading = false
+    cloudUploadInFlight = false
+    if (cloudUploadPending) {
+      cloudUploadPending = false
+      scheduleCloudUpload()
+    }
+  }
+}
+
+export async function downloadCloudData(): Promise<boolean> {
+  if (!cloudSyncReady()) {
+    cloudSyncStatus.message = '云同步未启用或配置不完整'
+    return false
+  }
+
+  cloudSyncStatus.downloading = true
+  cloudSyncStatus.message = '正在从 GitHub 下载...'
+
+  try {
+    const data = await loadDataFromGitHub(cloudSyncSettings)
+    if (!data) {
+      cloudSyncStatus.message = '云端还没有数据，请先上传当前数据'
+      return false
+    }
+
+    cloudSyncSuppressed = true
+    const ok = importAllData(data)
+    window.setTimeout(() => {
+      cloudSyncSuppressed = false
+    }, 0)
+
+    if (!ok) throw new Error('云端数据格式不正确')
+    cloudSyncSettings.lastSyncAt = new Date().toISOString()
+    cloudSyncSettings.lastSyncError = ''
+    cloudSyncStatus.message = '已从 GitHub 恢复数据'
+    return true
+  } catch (error) {
+    cloudSyncSuppressed = false
+    setCloudError(error)
+    return false
+  } finally {
+    cloudSyncStatus.downloading = false
+  }
+}
 
 // ─── Computed ─────────────────────────────────────────────
 
